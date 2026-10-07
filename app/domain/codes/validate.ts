@@ -2,6 +2,7 @@ export const MAX_CODE_LENGTH = 255;
 
 export type CodeIssueReason =
   | "contains_whitespace"
+  | "invalid_characters"
   | "too_long"
   | "duplicate_in_list"
   | "already_exists";
@@ -29,6 +30,11 @@ export function validateCodes(
     if (code === "") continue;
     if (/\s/.test(code)) {
       issues.push({ code, reason: "contains_whitespace" });
+      continue;
+    }
+    // Invisible characters (e.g. zero-width spaces from spreadsheets) make codes customers can't type.
+    if (/[\p{Cc}\p{Cf}]/u.test(code)) {
+      issues.push({ code, reason: "invalid_characters" });
       continue;
     }
     if (code.length > MAX_CODE_LENGTH) {

@@ -75,6 +75,57 @@ describe("expandRecurring", () => {
     ]);
   });
 
+  it("drops an occurrence whose start falls in a skipped DST hour and would end before it starts", () => {
+    const windows = expandRecurring(
+      { weekdays: [7], startTime: "02:30", stopTime: "03:15", firstDate: "2026-03-08", lastDate: "2026-03-08" },
+      "America/New_York",
+      new Date("2026-03-01T00:00:00Z"),
+      new Date("2026-03-15T00:00:00Z"),
+    );
+    expect(windows).toEqual([]);
+  });
+
+  it("keeps an occurrence that starts in a skipped DST hour but still ends after it starts", () => {
+    const windows = expandRecurring(
+      { weekdays: [7], startTime: "02:30", stopTime: "05:00", firstDate: "2026-03-08", lastDate: "2026-03-08" },
+      "America/New_York",
+      new Date("2026-03-01T00:00:00Z"),
+      new Date("2026-03-15T00:00:00Z"),
+    );
+    expect(windows.map(span)).toEqual([["2026-03-08T07:30:00.000Z", "2026-03-08T09:00:00.000Z"]]);
+  });
+
+  it("keeps every day in zones whose clocks skip midnight", () => {
+    const daily = {
+      weekdays: [1, 2, 3, 4, 5, 6, 7],
+      startTime: "10:00",
+      stopTime: "11:00",
+      firstDate: "2026-09-06",
+      lastDate: "2026-09-08",
+    };
+    const all = expandRecurring(
+      daily,
+      "America/Santiago",
+      new Date("2026-09-01T00:00:00Z"),
+      new Date("2026-09-20T00:00:00Z"),
+    );
+    expect(all.map(span)).toEqual([
+      ["2026-09-06T13:00:00.000Z", "2026-09-06T14:00:00.000Z"],
+      ["2026-09-07T13:00:00.000Z", "2026-09-07T14:00:00.000Z"],
+      ["2026-09-08T13:00:00.000Z", "2026-09-08T14:00:00.000Z"],
+    ]);
+    const fromMidRange = expandRecurring(
+      daily,
+      "America/Santiago",
+      new Date("2026-09-07T12:00:00Z"),
+      new Date("2026-09-20T00:00:00Z"),
+    );
+    expect(fromMidRange.map(span)).toEqual([
+      ["2026-09-07T13:00:00.000Z", "2026-09-07T14:00:00.000Z"],
+      ["2026-09-08T13:00:00.000Z", "2026-09-08T14:00:00.000Z"],
+    ]);
+  });
+
   it("rejects invalid schedules", () => {
     const from = new Date("2026-11-01T00:00:00Z");
     const to = new Date("2026-12-01T00:00:00Z");

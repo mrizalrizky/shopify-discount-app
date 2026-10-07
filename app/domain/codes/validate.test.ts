@@ -50,6 +50,16 @@ describe("validateCodes", () => {
     });
   });
 
+  it("reports invisible control or format characters pasted from spreadsheets", () => {
+    expect(validateCodes(["SALE​10", "TAB\u0007X", "SALE10"], new Set())).toEqual({
+      valid: ["SALE10"],
+      issues: [
+        { code: "SALE​10", reason: "invalid_characters" },
+        { code: "TAB\u0007X", reason: "invalid_characters" },
+      ],
+    });
+  });
+
   it("accepts a code of exactly the maximum length", () => {
     const max = "A".repeat(MAX_CODE_LENGTH);
     expect(validateCodes([max], new Set()).valid).toEqual([max]);

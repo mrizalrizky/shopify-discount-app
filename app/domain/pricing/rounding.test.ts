@@ -31,5 +31,8 @@ describe("applyRounding", () => {
     expect(() => applyRounding(100, { kind: "roundDown", step: 0 })).toThrow();
     expect(() => applyRounding(100, { kind: "endsWith", ending: 1000, modulus: 1000 })).toThrow();
     expect(() => applyRounding(100, { kind: "endsWith", ending: -1, modulus: 1000 })).toThrow();
+    expect(() => applyRounding(100, { kind: "roundDown", step: 0.5 })).toThrow();
+    expect(() => applyRounding(100, { kind: "endsWith", ending: 0.5, modulus: 1000 })).toThrow();
+    expect(() => applyRounding(100, { kind: "endsWith", ending: 90, modulus: 100.5 })).toThrow();
   });
 });

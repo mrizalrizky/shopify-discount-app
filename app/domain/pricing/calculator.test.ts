@@ -149,6 +149,16 @@ describe("calculateSalePrice", () => {
       expect(() => calculateSalePrice(v, { type: "percentOff", amount: 101 }, plain)).toThrow();
     });
 
+    it("rejects invalid variant prices and pricing options", () => {
+      const v = { price: RP(100_000), compareAt: null };
+      const d = { type: "percentOff" as const, amount: 10 };
+      expect(() => calculateSalePrice({ price: NaN, compareAt: null }, d, plain)).toThrow();
+      expect(() => calculateSalePrice({ price: 100.5, compareAt: null }, d, plain)).toThrow();
+      expect(() => calculateSalePrice({ price: RP(100), compareAt: 1.5 }, d, plain)).toThrow();
+      expect(() => calculateSalePrice(v, d, { ...plain, minPrice: 1.5 })).toThrow();
+      expect(() => calculateSalePrice(v, d, { ...plain, minPrice: -1 })).toThrow();
+    });
+
     it("rejects negative or fractional money amounts", () => {
       const v = { price: RP(100_000), compareAt: null };
       expect(() => calculateSalePrice(v, { type: "fixedOff", amount: -1 }, plain)).toThrow();

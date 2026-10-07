@@ -34,6 +34,9 @@ export function calculateSalePrice(
   options: PricingOptions,
 ): PriceResult {
   validateDiscount(discount);
+  assertMoney(variant.price, "price");
+  if (variant.compareAt !== null) assertMoney(variant.compareAt, "compareAt");
+  if (options.minPrice !== null) assertMoney(options.minPrice, "minPrice");
 
   const hasValidCompareAt = variant.compareAt !== null && variant.compareAt > variant.price;
   const base =
@@ -67,7 +70,11 @@ function validateDiscount(discount: Discount): void {
     }
     return;
   }
-  if (!Number.isInteger(discount.amount) || discount.amount < 0) {
-    throw new Error(`Money amount must be a non-negative integer, got ${discount.amount}`);
+  assertMoney(discount.amount, "discount amount");
+}
+
+function assertMoney(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative integer in minor units, got ${value}`);
   }
 }

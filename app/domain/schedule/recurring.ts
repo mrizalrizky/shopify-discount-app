@@ -37,32 +37,46 @@ export function expandRecurring(
     if (!Number.isInteger(day) || day < 1 || day > 7) throw new Error(`Invalid weekday: ${day}`);
   }
 
-  const firstDate = parseDate(schedule.firstDate, timezone);
-  const lastDate = parseDate(schedule.lastDate, timezone);
+  const firstDate = parseDate(schedule.firstDate);
+  const lastDate = parseDate(schedule.lastDate);
   if (lastDate < firstDate) throw new Error("lastDate must not be before firstDate");
 
+  // Iterate calendar dates (in UTC, so no DST shifts) rather than instants in
+  // the shop zone: some zones skip midnight, which would shift every later day.
   // Start one day early so an overnight window that began yesterday is found.
-  const scanFrom = DateTime.fromJSDate(from, { zone: timezone }).startOf("day").minus({ days: 1 });
-  const scanTo = DateTime.fromJSDate(to, { zone: timezone }).startOf("day");
-  let day = DateTime.max(firstDate, scanFrom);
-  const lastDay = DateTime.min(lastDate, scanTo);
+  const scanFrom = calendarDate(DateTime.fromJSDate(from, { zone: timezone })).minus({ days: 1 });
+  const scanTo = calendarDate(DateTime.fromJSDate(to, { zone: timezone }));
+  let date = DateTime.max(firstDate, scanFrom);
+  const lastScanDate = DateTime.min(lastDate, scanTo);
 
   const windows: TimeWindow[] = [];
-  while (day <= lastDay) {
-    if (schedule.weekdays.includes(day.weekday)) {
-      const windowStart = day.set({ ...start, second: 0, millisecond: 0 });
-      const windowEnd = (crossesMidnight ? day.plus({ days: 1 }) : day).set({
-        ...stop,
-        second: 0,
-        millisecond: 0,
-      });
+  while (date <= lastScanDate) {
+    if (schedule.weekdays.includes(date.weekday)) {
+      const windowStart = atLocalTime(date, start, timezone);
+      const windowEnd = atLocalTime(crossesMidnight ? date.plus({ days: 1 }) : date, stop, timezone);
       const startDate = windowStart.toJSDate();
       const endDate = windowEnd.toJSDate();
-      if (endDate > from && startDate < to) windows.push({ start: startDate, end: endDate });
+      // A start inside a skipped DST hour is pushed forward and can land after the end.
+      const valid = endDate > startDate;
+      if (valid && endDate > from && startDate < to) windows.push({ start: startDate, end: endDate });
     }
-    day = day.plus({ days: 1 });
+    date = date.plus({ days: 1 });
   }
   return windows;
+}
+
+function calendarDate(dateTime: DateTime): DateTime {
+  return DateTime.fromObject(
+    { year: dateTime.year, month: dateTime.month, day: dateTime.day },
+    { zone: "UTC" },
+  );
+}
+
+function atLocalTime(date: DateTime, time: { hour: number; minute: number }, timezone: string): DateTime {
+  return DateTime.fromObject(
+    { year: date.year, month: date.month, day: date.day, hour: time.hour, minute: time.minute },
+    { zone: timezone },
+  );
 }
 
 /** A missed start is applied only while its window is still open. */
@@ -76,10 +90,11 @@ function parseTime(value: string): { hour: number; minute: number } {
   return { hour: Number(match[1]), minute: Number(match[2]) };
 }
 
-function parseDate(value: string, timezone: string): DateTime {
-  const date = DateTime.fromISO(value, { zone: timezone });
+/** Parses a calendar date as UTC midnight, used only for date arithmetic. */
+function parseDate(value: string): DateTime {
+  const date = DateTime.fromISO(value, { zone: "UTC" });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !date.isValid) {
     throw new Error(`Invalid date "${value}", expected YYYY-MM-DD`);
   }
-  return date.startOf("day");
+  return date;
 }
