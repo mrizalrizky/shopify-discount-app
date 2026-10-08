@@ -42,6 +42,7 @@ describe("applyRun", () => {
     });
     expect(await testDb.priceSnapshot.count({ where: { runId: run.id, status: "APPLIED" } })).toBe(3);
     expect(await testDb.priceChangeLog.count({ where: { runId: run.id, action: "apply" } })).toBe(3);
+    expect(await testDb.priceChangeLog.count({ where: { saleId: sale.id, action: "apply" } })).toBe(3);
     const active = await testDb.saleRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(active.status).toBe("ACTIVE");
     expect(active.startedAt).not.toBeNull();

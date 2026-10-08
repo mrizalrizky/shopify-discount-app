@@ -99,7 +99,7 @@ model RuleGroup {
 model SaleRun {
   id              String          @id @default(cuid())
   saleId          String
-  sale            Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  sale            Sale            @relation(fields: [saleId], references: [id], onDelete: Restrict)
   status          RunStatus       @default(PREPARING)
   windowStart     DateTime
   windowEnd       DateTime?
@@ -117,7 +117,7 @@ model SaleRun {
 model PriceSnapshot {
   id                String         @id @default(cuid())
   runId             String
-  run               SaleRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  run               SaleRun        @relation(fields: [runId], references: [id], onDelete: Restrict)
   variantId         String
   productId         String
   ruleGroupId       String
@@ -149,6 +149,7 @@ model RunProduct {
 model PriceChangeLog {
   id           String   @id @default(cuid())
   shop         String
+  saleId       String
   runId        String
   variantId    String
   action       String

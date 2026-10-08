@@ -36,7 +36,7 @@ export async function refreshRun(
   });
 
   const leaving = snapshots.filter((s) => s.status === "APPLIED" && !planned.has(s.variantId));
-  if (leaving.length > 0) await restoreSnapshots(db, gateway, run.sale.shop, runId, leaving);
+  if (leaving.length > 0) await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, leaving);
   const stranded = snapshots.some((s) => s.status === "PENDING");
   if (added.length > 0 || stranded) await applyRun(db, gateway, runId);
 

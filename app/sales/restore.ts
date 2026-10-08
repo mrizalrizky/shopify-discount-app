@@ -24,17 +24,22 @@ export async function restoreRun(
     where: { runId, status: { in: ["PENDING", "APPLIED"] } },
     orderBy: { variantId: "asc" },
   });
-  const result = await restoreSnapshots(db, gateway, run.sale.shop, runId, snapshots);
+  const result = await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, snapshots);
   await restoreTags(db, gateway, runId);
   await db.saleRun.updateMany({ where: { id: runId, status: "RESTORING" }, data: { status: "ENDED", endedAt: new Date() } });
   return result;
 }
 
+export interface RunContext {
+  runId: string;
+  saleId: string;
+  shop: string;
+}
+
 export async function restoreSnapshots(
   db: PrismaClient,
   gateway: ShopifyGateway,
-  shop: string,
-  runId: string,
+  { runId, saleId, shop }: RunContext,
   snapshots: PriceSnapshot[],
 ): Promise<{ restored: number; conflicts: number }> {
   const states = await gateway.getVariants(snapshots.map((s) => s.variantId));
@@ -92,6 +97,7 @@ export async function restoreSnapshots(
         await tx.priceChangeLog.createMany({
           data: logged.map((s) => ({
             shop,
+            saleId,
             runId,
             variantId: s.variantId,
             action: "restore",
@@ -148,6 +154,7 @@ export async function resolveConflict(
       await tx.priceChangeLog.create({
         data: {
           shop: snap.run.sale.shop,
+          saleId: snap.run.saleId,
           runId: snap.runId,
           variantId: snap.variantId,
           action: "restore",

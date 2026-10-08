@@ -40,6 +40,7 @@ describe("restoreRun", () => {
     expect(shopify.variants.get("v1")).toMatchObject({ price: RP(200_000), compareAt: null, marker: null });
     expect(shopify.variants.get("v2")).toMatchObject({ price: RP(400_000), compareAt: RP(500_000), marker: null });
     expect(await testDb.priceChangeLog.count({ where: { runId: run.id, action: "restore" } })).toBe(3);
+    expect(await testDb.priceChangeLog.count({ where: { saleId: run.saleId, action: "restore" } })).toBe(3);
     const ended = await testDb.saleRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(ended.status).toBe("ENDED");
     expect(ended.endedAt).not.toBeNull();
@@ -126,6 +127,8 @@ describe("resolveConflict", () => {
     expect(shopify.variants.get("v3")).toMatchObject({ price: RP(250_000), marker: null });
     expect((await testDb.priceSnapshot.findUniqueOrThrow({ where: { id: v1.id } })).status).toBe("RESTORED");
     expect((await testDb.priceSnapshot.findUniqueOrThrow({ where: { id: v3.id } })).status).toBe("KEPT");
+    const resolvedLog = await testDb.priceChangeLog.findFirstOrThrow({ where: { variantId: "v1", action: "restore" } });
+    expect(resolvedLog.saleId).toBe(run.saleId);
   });
 });
 

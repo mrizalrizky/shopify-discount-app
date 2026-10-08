@@ -73,6 +73,7 @@ export async function applyRun(
         await tx.priceChangeLog.createMany({
           data: nowApplied.map((s) => ({
             shop: run.sale.shop,
+            saleId: run.saleId,
             runId,
             variantId: s.variantId,
             action: "apply",
