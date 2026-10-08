@@ -1,19 +1,12 @@
 import PgBoss from "pg-boss";
 import prisma from "./db.server";
 import { createJobHandlers, QUEUES } from "./jobs/handlers";
+import { RUN_JOB_EXPIRE_SECONDS } from "./jobs/queue-config";
 import { unauthenticated } from "./shopify.server";
 import { adminGraphql, createGraphqlGateway } from "./shopify/graphql-gateway";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) throw new Error("DATABASE_URL is not set");
-
-/**
- * How long pg-boss lets a run job stay active before expiring it (marking it failed).
- * Must be well above the worst-case apply/restore of a large catalog: pg-boss stops awaiting an
- * expired handler but cannot cancel it, so the old handler keeps running next to a re-sent job.
- * The run lease (handlers.ts) fences such overlaps; this keeps them from happening routinely.
- */
-const RUN_JOB_EXPIRE_SECONDS = 4 * 60 * 60;
 
 /**
  * Concurrent jobs per run queue in this process, so one shop's long restore does not hold up
