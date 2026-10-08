@@ -25,7 +25,7 @@ export async function prepareRun(
   // The overlap check and snapshot write share one transaction guarded by a
   // per-shop advisory lock, so concurrent prepares for the same shop serialize.
   const overlaps = await db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${run.sale.shop}))::text`;
+    await lockShop(tx, run.sale.shop);
     const found = await findActiveOverlaps(tx, run.sale, plan.changes.map((c) => c.variantId));
     if (found.length > 0) return found;
 
@@ -57,7 +57,11 @@ export async function prepareRun(
   return { status: "ready", count: plan.changes.length, skipped: plan.skipped };
 }
 
-async function findActiveOverlaps(db: Prisma.TransactionClient, sale: Sale, variantIds: string[]): Promise<Overlap[]> {
+export async function lockShop(tx: Prisma.TransactionClient, shop: string): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${shop}))::text`;
+}
+
+export async function findActiveOverlaps(db: Prisma.TransactionClient, sale: Sale, variantIds: string[]): Promise<Overlap[]> {
   const rows = await db.priceSnapshot.findMany({
     where: {
       status: { in: ["PENDING", "APPLIED"] },

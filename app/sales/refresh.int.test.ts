@@ -52,4 +52,41 @@ describe("refreshRun", () => {
     expect(await refreshRun(testDb, shopify, run.id)).toEqual({ added: 0, removed: 0 });
     expect(shopify.variants.get("v3")!.price).toBe(RP(300_000));
   });
+
+  it("does not add a variant that belongs to another active sale", async () => {
+    const shopify = new FakeShopify();
+    shopify.addVariant("v1", "p1", RP(200_000));
+    shopify.addVariant("v3", "p3", RP(300_000));
+    shopify.setCollection("summer", ["p1"]);
+    shopify.setCollection("other", ["p3"]);
+    const run = await activeRun(shopify);
+    const other = await createSale(testDb, {
+      groups: [{ targets: [{ kind: "collection", id: "other" }], amount: 10 }],
+    });
+    const otherRun = await createRun(testDb, other.id);
+    await prepareRun(testDb, shopify, otherRun.id); // PENDING snapshots, no marker yet
+    shopify.setCollection("summer", ["p1", "p3"]);
+
+    expect(await refreshRun(testDb, shopify, run.id)).toEqual({ added: 0, removed: 0 });
+    expect(await testDb.priceSnapshot.count({ where: { runId: run.id, variantId: "v3" } })).toBe(0);
+  });
+
+  it("applies snapshots stranded PENDING by a failed earlier refresh", async () => {
+    const shopify = new FakeShopify();
+    shopify.addVariant("v1", "p1", RP(200_000));
+    shopify.addVariant("v3", "p3", RP(300_000));
+    shopify.setCollection("summer", ["p1"]);
+    const run = await activeRun(shopify);
+    shopify.setCollection("summer", ["p1", "p3"]);
+
+    shopify.failAfterWrites = shopify.writeCount;
+    await expect(refreshRun(testDb, shopify, run.id)).rejects.toThrow();
+    shopify.failAfterWrites = null;
+    expect(shopify.variants.get("v3")!.price).toBe(RP(300_000));
+
+    await refreshRun(testDb, shopify, run.id);
+    expect(shopify.variants.get("v3")!.price).toBe(RP(210_000));
+    const snap = await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v3" } });
+    expect(snap.status).toBe("APPLIED");
+  });
 });
