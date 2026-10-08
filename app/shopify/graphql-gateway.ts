@@ -220,17 +220,59 @@ export function adminGraphql(admin: AdminLike, sleep = defaultSleep): GraphqlFn 
         const response = await admin.graphql(query, { variables });
         body = await response.json();
       } catch (error) {
-        throw toGraphqlError(error);
+        throw await toGraphqlError(error);
       }
-      if (body.errors?.length) throw toGraphqlError(body.errors);
+      const errors = body.errors;
+      if (Array.isArray(errors) ? errors.length > 0 : errors) throw await toGraphqlError(errors);
       return body.data;
     }, sleep);
 }
 
-function toGraphqlError(error: unknown): ShopifyGraphqlError {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isThrottledGraphqlErrors(list: any): boolean {
+  return (
+    Array.isArray(list) &&
+    list.some((e) => e?.extensions?.code === "THROTTLED" || /throttled/i.test(String(e?.message ?? "")))
+  );
+}
+
+/**
+ * Classifies by structure (GraphqlQueryError with THROTTLED extension, HTTP 429 on
+ * HttpResponseError/HttpThrottlingError, thrown Response) with a message fallback.
+ */
+async function toGraphqlError(error: unknown): Promise<ShopifyGraphqlError> {
+  if (error instanceof ShopifyGraphqlError) return error;
+
+  // The app-react-router admin client rethrows HTTP errors as a Response.
+  if (typeof Response !== "undefined" && error instanceof Response) {
+    let detail = "";
+    try {
+      detail = (await error.text()).slice(0, 500);
+    } catch {
+      // body unreadable; status is enough
+    }
+    const message = `HTTP ${error.status} ${error.statusText}`.trim() + (detail ? `: ${detail}` : "");
+    return new ShopifyGraphqlError(message, error.status === 429);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const e = error as any;
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error);
-  return new ShopifyGraphqlError(message, /throttled/i.test(message));
+  const graphQLErrors = Array.isArray(e?.body?.errors?.graphQLErrors)
+    ? e.body.errors.graphQLErrors
+    : Array.isArray(e?.graphQLErrors)
+      ? e.graphQLErrors
+      : Array.isArray(e)
+        ? e
+        : null;
+  const throttled =
+    isThrottledGraphqlErrors(graphQLErrors) ||
+    e?.response?.code === 429 ||
+    e?.response?.status === 429 ||
+    e?.status === 429 ||
+    /throttl/i.test(message);
+  return new ShopifyGraphqlError(message, throttled);
 }
 
 export async function withThrottleRetry<T>(
