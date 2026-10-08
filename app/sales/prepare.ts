@@ -41,7 +41,7 @@ export async function prepareRun(
     });
     if (moved.count !== 1) throw new Error(`Run ${runId} is no longer PREPARING`);
     return [];
-  });
+  }, SHOP_LOCK_TX_OPTIONS);
 
   if (overlaps.length > 0) {
     await db.saleRun.update({
@@ -57,18 +57,33 @@ export async function prepareRun(
   return { status: "ready", count: plan.changes.length, skipped: plan.skipped };
 }
 
+/** First key of the two-key advisory lock, so shop locks never collide with other advisory lock users. */
+export const SHOP_LOCK_NAMESPACE = 0x53414c45; // "SALE"
+
+/** Interactive transactions that take the shop lock: wait for it, and allow time for large catalogs. */
+export const SHOP_LOCK_TX_OPTIONS = { maxWait: 30_000, timeout: 60_000 } as const;
+
+const OVERLAP_CHUNK = 5_000;
+
 export async function lockShop(tx: Prisma.TransactionClient, shop: string): Promise<void> {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${shop}))::text`;
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SHOP_LOCK_NAMESPACE}::int4, hashtext(${shop}))::text`;
 }
 
 export async function findActiveOverlaps(db: Prisma.TransactionClient, sale: Sale, variantIds: string[]): Promise<Overlap[]> {
-  const rows = await db.priceSnapshot.findMany({
-    where: {
-      status: { in: ["PENDING", "APPLIED"] },
-      run: { status: { in: ["APPLYING", "ACTIVE", "RESTORING"] }, sale: { shop: sale.shop, id: { not: sale.id } } },
-    },
-    select: { variantId: true, run: { select: { saleId: true } } },
-  });
+  const unique = [...new Set(variantIds)];
+  const rows: { variantId: string; run: { saleId: string } }[] = [];
+  for (let i = 0; i < unique.length; i += OVERLAP_CHUNK) {
+    rows.push(
+      ...(await db.priceSnapshot.findMany({
+        where: {
+          variantId: { in: unique.slice(i, i + OVERLAP_CHUNK) },
+          status: { in: ["PENDING", "APPLIED"] },
+          run: { status: { in: ["APPLYING", "ACTIVE", "RESTORING"] }, sale: { shop: sale.shop, id: { not: sale.id } } },
+        },
+        select: { variantId: true, run: { select: { saleId: true } } },
+      })),
+    );
+  }
   const bySale = new Map<string, Set<string>>();
   for (const row of rows) {
     const set = bySale.get(row.run.saleId) ?? new Set<string>();

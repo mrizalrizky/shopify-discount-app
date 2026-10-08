@@ -2,7 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { ShopifyGateway } from "../shopify/gateway";
 import { applyRun } from "./apply";
 import { planForSale, toSnapshotRow } from "./load";
-import { findActiveOverlaps, lockShop } from "./prepare";
+import { findActiveOverlaps, lockShop, SHOP_LOCK_TX_OPTIONS } from "./prepare";
 import { restoreSnapshots } from "./restore";
 
 export async function refreshRun(
@@ -33,7 +33,7 @@ export async function refreshRun(
       await tx.priceSnapshot.createMany({ data: fresh.map((c) => toSnapshotRow(runId, c)), skipDuplicates: true });
     }
     return fresh;
-  });
+  }, SHOP_LOCK_TX_OPTIONS);
 
   const leaving = snapshots.filter((s) => s.status === "APPLIED" && !planned.has(s.variantId));
   if (leaving.length > 0) await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, leaving);

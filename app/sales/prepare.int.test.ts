@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { resetDb, testDb } from "../../test/db";
 import { createRun, createSale } from "../../test/factories";
 import { FakeShopify } from "../../test/fake-shopify";
-import { prepareRun } from "./prepare";
+import type { Prisma } from "@prisma/client";
+import { findActiveOverlaps, lockShop, prepareRun, SHOP_LOCK_NAMESPACE } from "./prepare";
 
 const RP = (rupiah: number) => rupiah * 100;
 
@@ -96,5 +97,71 @@ describe("prepareRun", () => {
     const snaps = await testDb.priceSnapshot.findMany({ where: { variantId: { in: ["v1", "v2"] } } });
     expect(snaps).toHaveLength(2);
     expect(new Set(snaps.map((x) => x.runId)).size).toBe(1);
+  });
+});
+
+describe("findActiveOverlaps", () => {
+  beforeEach(resetDb);
+
+  async function liveSnapshotIn(otherSaleStatus: "ACTIVE", variantIds: string[]) {
+    const other = await createSale(testDb, { groups: [] });
+    const run = await createRun(testDb, other.id);
+    await testDb.saleRun.update({ where: { id: run.id }, data: { status: otherSaleStatus } });
+    await testDb.priceSnapshot.createMany({
+      data: variantIds.map((variantId) => ({
+        runId: run.id, variantId, productId: "p", ruleGroupId: "g",
+        originalPrice: 2n, originalCompareAt: null, appliedPrice: 1n, appliedCompareAt: 2n, status: "APPLIED" as const,
+      })),
+    });
+    return other;
+  }
+
+  function recordingTx() {
+    const calls: Prisma.PriceSnapshotFindManyArgs[] = [];
+    const tx = {
+      priceSnapshot: {
+        findMany: (args: Prisma.PriceSnapshotFindManyArgs) => {
+          calls.push(args);
+          return testDb.priceSnapshot.findMany(args);
+        },
+      },
+    } as unknown as Prisma.TransactionClient;
+    return { tx, calls };
+  }
+
+  it("queries only the requested variants, in chunks, and finds overlaps across chunks", async () => {
+    const ids = Array.from({ length: 12_001 }, (_, i) => `v${i}`);
+    const other = await liveSnapshotIn("ACTIVE", ["v3", "v11000", "elsewhere"]);
+    const sale = await createSale(testDb, { groups: [] });
+    const { tx, calls } = recordingTx();
+
+    const overlaps = await findActiveOverlaps(tx, sale, ids);
+
+    expect(overlaps).toEqual([{ saleId: other.id, variantIds: ["v11000", "v3"] }]);
+    expect(calls.length).toBe(3);
+    for (const call of calls) {
+      const filter = call.where?.variantId as { in: string[] };
+      expect(filter.in.length).toBeLessThanOrEqual(5_000);
+    }
+  });
+
+  it("does not query when there are no variants", async () => {
+    const sale = await createSale(testDb, { groups: [] });
+    const { tx, calls } = recordingTx();
+
+    expect(await findActiveOverlaps(tx, sale, [])).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("lockShop", () => {
+  it("takes a namespaced two-key advisory lock", async () => {
+    const rows = await testDb.$transaction(async (tx) => {
+      await lockShop(tx, "demo.myshopify.com");
+      return testDb.$queryRaw<{ classid: number; objsubid: number }[]>`
+        SELECT classid::int AS classid, objsubid::int AS objsubid FROM pg_locks
+        WHERE locktype = 'advisory' AND granted AND objid = (hashtext(${"demo.myshopify.com"}))::oid`;
+    });
+    expect(rows).toEqual([{ classid: SHOP_LOCK_NAMESPACE, objsubid: 2 }]);
   });
 });
