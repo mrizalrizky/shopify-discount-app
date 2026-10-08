@@ -11,6 +11,11 @@ export interface ScheduleSale {
   timezone: string;
 }
 
+/**
+ * A run consumes its window: once a run exists for a window's start, that window is never
+ * started again, whatever the run's outcome. A FAILED run therefore is not retried here
+ * (runs only FAIL on overlap; transient errors keep the run open for the job queue to retry).
+ */
 export interface ScheduleRun {
   id: string;
   windowStart: Date;
@@ -24,6 +29,16 @@ export type DueAction =
   | { kind: "stop"; runId: string }
   | { kind: "complete" };
 
+/**
+ * Decides what the scheduler should do for one sale at `now`.
+ *
+ * - Open runs whose `windowEnd <= now` get a `stop`.
+ * - A `start` is emitted only when the window has no run yet (runs consume their window, see
+ *   ScheduleRun) and no run of the sale is open. Editing the schedule while a run is open
+ *   therefore never starts a second run over it; the new window starts on a later tick, after
+ *   the open run has been stopped.
+ * - `complete` is emitted only when no run is open.
+ */
 export function dueActions(sale: ScheduleSale, runs: readonly ScheduleRun[], now: Date): DueAction[] {
   const actions: DueAction[] = [];
   for (const run of runs) {
@@ -39,7 +54,7 @@ export function dueActions(sale: ScheduleSale, runs: readonly ScheduleRun[], now
     case "once": {
       if (!sale.startsAt) throw new Error("A one-time sale needs startsAt");
       const pastEnd = sale.endsAt !== null && now >= sale.endsAt;
-      if (!pastEnd && now >= sale.startsAt && !hasRun(sale.startsAt)) {
+      if (!anyOpen && !pastEnd && now >= sale.startsAt && !hasRun(sale.startsAt)) {
         actions.push({ kind: "start", windowStart: sale.startsAt, windowEnd: sale.endsAt });
       }
       if (!anyOpen && (pastEnd || hasRun(sale.startsAt))) actions.push({ kind: "complete" });
@@ -49,8 +64,10 @@ export function dueActions(sale: ScheduleSale, runs: readonly ScheduleRun[], now
     case "recurring": {
       if (!sale.recurring) throw new Error("A recurring sale needs a recurring schedule");
       const openWindows = expandRecurring(sale.recurring, sale.timezone, now, new Date(now.getTime() + 1));
-      for (const window of openWindows) {
-        if (!hasRun(window.start)) actions.push({ kind: "start", windowStart: window.start, windowEnd: window.end });
+      if (!anyOpen) {
+        for (const window of openWindows) {
+          if (!hasRun(window.start)) actions.push({ kind: "start", windowStart: window.start, windowEnd: window.end });
+        }
       }
       const afterLastWindow = DateTime.fromISO(sale.recurring.lastDate, { zone: sale.timezone })
         .plus({ days: 2 })

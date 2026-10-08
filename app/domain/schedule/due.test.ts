@@ -46,6 +46,19 @@ describe("dueActions — once", () => {
     expect(dueActions(once, [], at("2026-11-09T00:00:00Z"))).toEqual([{ kind: "complete" }]);
   });
 
+  it("a closed run consumes its window: no retry, and the sale completes", () => {
+    const closed = run({ open: false });
+    expect(dueActions(once, [closed], at("2026-11-07T00:00:00Z"))).toEqual([{ kind: "complete" }]);
+  });
+
+  it("does not start while an open run from a previous schedule exists", () => {
+    const oldRun = run({ windowStart: at("2026-11-01T12:00:00Z"), windowEnd: at("2026-11-10T12:00:00Z") });
+    const earlier = { ...once, startsAt: at("2026-11-05T12:00:00Z") };
+    expect(dueActions(earlier, [oldRun], at("2026-11-06T00:00:00Z"))).toEqual([]);
+    const later = { ...once, startsAt: at("2026-11-06T18:00:00Z") };
+    expect(dueActions(later, [oldRun], at("2026-11-07T00:00:00Z"))).toEqual([]);
+  });
+
   it("with no end date, completes only after its run is closed", () => {
     const openEnded = { ...once, endsAt: null };
     expect(dueActions(openEnded, [run({ windowEnd: null })], at("2026-12-01T00:00:00Z"))).toEqual([]);
@@ -78,6 +91,11 @@ describe("dueActions — recurring", () => {
   it("stops a window at its end", () => {
     const current = run({ windowStart: at("2026-11-06T12:00:00Z"), windowEnd: at("2026-11-06T16:00:00Z") });
     expect(dueActions(recurring, [current], at("2026-11-06T16:00:00Z"))).toEqual([{ kind: "stop", runId: "r1" }]);
+  });
+
+  it("returns only the stop for an expired open run, starting the new window on a later tick", () => {
+    const oldRun = run({ windowStart: at("2026-11-06T12:00:00Z"), windowEnd: at("2026-11-06T16:00:00Z") });
+    expect(dueActions(recurring, [oldRun], at("2026-11-13T13:00:00Z"))).toEqual([{ kind: "stop", runId: "r1" }]);
   });
 
   it("completes after the last date", () => {
