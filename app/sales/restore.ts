@@ -12,10 +12,14 @@ export async function restoreRun(
   if (run.status === "ENDED") return { restored: 0, conflicts: 0 };
 
   const claimedRun = await db.saleRun.updateMany({
-    where: { id: runId, status: { in: ["APPLYING", "ACTIVE", "RESTORING", "FAILED"] } },
+    where: { id: runId, status: { in: ["PREPARING", "APPLYING", "ACTIVE", "RESTORING", "FAILED"] } },
     data: { status: "RESTORING" },
   });
-  if (claimedRun.count === 0) return { restored: 0, conflicts: 0 }; // ended concurrently
+  if (claimedRun.count === 0) {
+    const now = await db.saleRun.findUniqueOrThrow({ where: { id: runId } });
+    if (now.status === "ENDED") return { restored: 0, conflicts: 0 }; // ended concurrently
+    throw new Error(`Run ${runId} cannot be restored in status ${now.status}`);
+  }
   const snapshots = await db.priceSnapshot.findMany({
     where: { runId, status: { in: ["PENDING", "APPLIED"] } },
     orderBy: { variantId: "asc" },
@@ -121,15 +125,27 @@ export async function resolveConflict(
   choice: "restore" | "keep",
 ): Promise<void> {
   const snap = await db.priceSnapshot.findUniqueOrThrow({ where: { id: snapshotId }, include: { run: { include: { sale: true } } } });
-  if (snap.status !== "CONFLICT") throw new Error(`Snapshot ${snapshotId} is not in conflict`);
+  if (snap.status !== "CONFLICT") return; // already resolved: idempotent no-op
 
-  if (choice === "restore") {
-    const current = (await gateway.getVariants([snap.variantId])).get(snap.variantId);
-    await gateway.writePrices(snap.productId, [
-      { variantId: snap.variantId, price: moneyFromDb(snap.originalPrice), compareAt: optionalMoneyFromDb(snap.originalCompareAt) },
-    ]);
-    if (current) {
-      await db.priceChangeLog.create({
+  const current = (await gateway.getVariants([snap.variantId])).get(snap.variantId);
+  const nextStatus = choice === "restore" ? "RESTORED" : "KEPT";
+  let needsLog = false;
+
+  if (current) {
+    if (choice === "restore" && !snapshotMatches(current, snap.originalPrice, snap.originalCompareAt)) {
+      await gateway.writePrices(snap.productId, [
+        { variantId: snap.variantId, price: moneyFromDb(snap.originalPrice), compareAt: optionalMoneyFromDb(snap.originalCompareAt) },
+      ]);
+      needsLog = true;
+    }
+    await gateway.clearMarkers([snap.variantId]);
+  }
+
+  await db.$transaction(async (tx) => {
+    const claimed = await tx.priceSnapshot.updateMany({ where: { id: snapshotId, status: "CONFLICT" }, data: { status: nextStatus } });
+    if (claimed.count !== 1) return; // already resolved by a concurrent call or an earlier attempt
+    if (needsLog && current) {
+      await tx.priceChangeLog.create({
         data: {
           shop: snap.run.sale.shop,
           runId: snap.runId,
@@ -142,11 +158,6 @@ export async function resolveConflict(
         },
       });
     }
-  }
-  await gateway.clearMarkers([snap.variantId]);
-  await db.priceSnapshot.update({
-    where: { id: snapshotId },
-    data: { status: choice === "restore" ? "RESTORED" : "KEPT" },
   });
 }
 

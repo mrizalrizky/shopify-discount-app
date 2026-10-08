@@ -64,6 +64,7 @@ describe("restoreRun", () => {
 
     expect(await restoreRun(testDb, shopify, run.id)).toEqual({ restored: 3, conflicts: 0 });
     expect(shopify.variants.get("v3")!.marker).toBeNull();
+    expect(await testDb.priceChangeLog.count({ where: { runId: run.id, action: "restore" } })).toBe(3);
   });
 
   it("treats a variant deleted during the sale as restored", async () => {
@@ -84,6 +85,15 @@ describe("restoreRun", () => {
 
     expect(shopify.tags.get("p1")!.sort()).toEqual(["new-in", "sale"]); // "sale" was there before
     expect(shopify.tags.get("p2")).toEqual([]);
+  });
+
+  it("restores a run that never left PREPARING and ends it", async () => {
+    const shopify = store();
+    const sale = await createSale(testDb, { groups: [{ targets: [{ kind: "collection", id: "summer" }], amount: 30 }] });
+    const run = await createRun(testDb, sale.id);
+
+    expect(await restoreRun(testDb, shopify, run.id)).toEqual({ restored: 0, conflicts: 0 });
+    expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("ENDED");
   });
 
   it("is a no-op for an ended run", async () => {
@@ -116,6 +126,37 @@ describe("resolveConflict", () => {
     expect(shopify.variants.get("v3")).toMatchObject({ price: RP(250_000), marker: null });
     expect((await testDb.priceSnapshot.findUniqueOrThrow({ where: { id: v1.id } })).status).toBe("RESTORED");
     expect((await testDb.priceSnapshot.findUniqueOrThrow({ where: { id: v3.id } })).status).toBe("KEPT");
+  });
+});
+
+describe("resolveConflict idempotence", () => {
+  beforeEach(resetDb);
+
+  it("second restore resolution is a no-op and logs once", async () => {
+    const shopify = store();
+    const run = await activeRun(shopify);
+    shopify.variants.get("v1")!.price = RP(99_000);
+    await restoreRun(testDb, shopify, run.id);
+    const v1 = await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v1" } });
+
+    await resolveConflict(testDb, shopify, v1.id, "restore");
+    await resolveConflict(testDb, shopify, v1.id, "restore");
+
+    expect(await testDb.priceChangeLog.count({ where: { runId: run.id, variantId: "v1", action: "restore" } })).toBe(1);
+  });
+
+  it("resolving a conflict for a deleted variant marks it RESTORED without logging", async () => {
+    const shopify = store();
+    const run = await activeRun(shopify);
+    shopify.variants.get("v1")!.price = RP(99_000);
+    await restoreRun(testDb, shopify, run.id);
+    const v1 = await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v1" } });
+    shopify.variants.delete("v1");
+
+    await resolveConflict(testDb, shopify, v1.id, "restore");
+
+    expect((await testDb.priceSnapshot.findUniqueOrThrow({ where: { id: v1.id } })).status).toBe("RESTORED");
+    expect(await testDb.priceChangeLog.count({ where: { runId: run.id, variantId: "v1", action: "restore" } })).toBe(0);
   });
 });
 
