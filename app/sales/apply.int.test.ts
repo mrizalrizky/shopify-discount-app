@@ -107,6 +107,30 @@ describe("applyRun", () => {
     ]);
   });
 
+  it("marks a snapshot CONFLICT when its variant was deleted from Shopify", async () => {
+    const shopify = store();
+    const { run } = await preparedRun(shopify);
+    shopify.variants.delete("v3");
+
+    expect(await applyRun(testDb, shopify, run.id)).toEqual({ applied: 2, conflicts: 1 });
+    const snap = await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v3" } });
+    expect(snap.status).toBe("CONFLICT");
+    expect(await testDb.priceChangeLog.count({ where: { runId: run.id, variantId: "v3" } })).toBe(0);
+  });
+
+  it("does not double-log when two applies race on the same run", async () => {
+    const shopify = store();
+    const { run } = await preparedRun(shopify);
+
+    await Promise.allSettled([applyRun(testDb, shopify, run.id), applyRun(testDb, shopify, run.id)]);
+    await applyRun(testDb, shopify, run.id); // reconcile anything the loser rolled back
+
+    for (const v of ["v1", "v2", "v3"]) {
+      expect(await testDb.priceChangeLog.count({ where: { runId: run.id, variantId: v, action: "apply" } })).toBe(1);
+    }
+    expect(await testDb.priceSnapshot.count({ where: { runId: run.id, status: "APPLIED" } })).toBe(3);
+  });
+
   it("refuses runs that are not prepared", async () => {
     const shopify = store();
     const sale = await createSale(testDb, { groups: [] });

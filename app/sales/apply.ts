@@ -54,22 +54,36 @@ export async function applyRun(
     }
 
     const nowApplied = [...alreadyWritten, ...toWrite];
-    await db.$transaction([
-      db.priceSnapshot.updateMany({ where: { id: { in: nowApplied.map((s) => s.id) } }, data: { status: "APPLIED" } }),
-      db.priceSnapshot.updateMany({ where: { id: { in: conflicted.map((s) => s.id) } }, data: { status: "CONFLICT" } }),
-      db.priceChangeLog.createMany({
-        data: nowApplied.map((s) => ({
-          shop: run.sale.shop,
-          runId,
-          variantId: s.variantId,
-          action: "apply",
-          oldPrice: s.originalPrice,
-          oldCompareAt: s.originalCompareAt,
-          newPrice: s.appliedPrice,
-          newCompareAt: s.appliedCompareAt,
-        })),
-      }),
-    ]);
+    if (nowApplied.length > 0 || conflicted.length > 0) {
+      await db.$transaction(async (tx) => {
+        const claimed = await tx.priceSnapshot.updateMany({
+          where: { id: { in: nowApplied.map((s) => s.id) }, status: "PENDING" },
+          data: { status: "APPLIED" },
+        });
+        if (claimed.count !== nowApplied.length) {
+          throw new Error(`Concurrent apply detected for run ${runId}`);
+        }
+        const conflictClaim = await tx.priceSnapshot.updateMany({
+          where: { id: { in: conflicted.map((s) => s.id) }, status: "PENDING" },
+          data: { status: "CONFLICT" },
+        });
+        if (conflictClaim.count !== conflicted.length) {
+          throw new Error(`Concurrent apply detected for run ${runId}`);
+        }
+        await tx.priceChangeLog.createMany({
+          data: nowApplied.map((s) => ({
+            shop: run.sale.shop,
+            runId,
+            variantId: s.variantId,
+            action: "apply",
+            oldPrice: s.originalPrice,
+            oldCompareAt: s.originalCompareAt,
+            newPrice: s.appliedPrice,
+            newCompareAt: s.appliedCompareAt,
+          })),
+        });
+      });
+    }
     applied += nowApplied.length;
     conflicts += conflicted.length;
   }
@@ -77,7 +91,7 @@ export async function applyRun(
   await applyTags(db, gateway, run);
 
   if (run.status === "APPLYING") {
-    await db.saleRun.update({ where: { id: runId }, data: { status: "ACTIVE", startedAt: new Date() } });
+    await db.saleRun.updateMany({ where: { id: runId, status: "APPLYING" }, data: { status: "ACTIVE", startedAt: new Date() } });
   }
   return { applied, conflicts };
 }
