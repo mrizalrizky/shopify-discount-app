@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { resetDb, testDb } from "../../test/db";
 import { createSale } from "../../test/factories";
 import { FakeShopify } from "../../test/fake-shopify";
+import { LeaseLostError } from "../sales/guard";
 import { createJobHandlers, LEASE_MS, REFRESH_INTERVAL_MS, RunBusyError, type RunQueue } from "./handlers";
 
 const RP = (rupiah: number) => rupiah * 100;
@@ -167,6 +168,132 @@ describe("job handlers", () => {
 
       expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: runId } })).leaseUntil).toBeNull();
       expect(LEASE_MS).toBe(15 * 60 * 1000);
+    });
+  });
+
+  describe("lease fencing", () => {
+    it("a stop that takes over an expired lease mid-apply leaves no variant discounted", async () => {
+      const clock = { now: new Date("2026-11-06T12:00:30Z") };
+      const { shopify, sent, handlers } = setup(clock);
+      shopify.addVariant("v3", "p3", RP(300_000));
+      shopify.setCollection("summer", ["p1", "p3"]);
+      await onceSale();
+      await handlers.tick();
+      const runId = sent[0].runId;
+
+      let stop: Promise<void> | null = null;
+      shopify.beforeCall = async () => {
+        if (shopify.writeCount !== 1 || stop) return; // p1 written; p3 not yet
+        // The apply has been slow: its lease expired and the window ended, so a stop takes over.
+        clock.now = new Date(END.getTime() + LEASE_MS);
+        stop = handlers.stopRun(runId);
+        await stop;
+      };
+
+      await expect(handlers.startRun(runId)).rejects.toBeInstanceOf(LeaseLostError);
+
+      expect(shopify.variants.get("v1")).toMatchObject({ price: RP(200_000), compareAt: null, marker: null });
+      expect(shopify.variants.get("v3")).toMatchObject({ price: RP(300_000), compareAt: null, marker: null });
+      const snaps = await testDb.priceSnapshot.findMany({ where: { runId } });
+      expect(snaps.map((s) => s.status)).toEqual(["RESTORED", "RESTORED"]);
+      const run = await testDb.saleRun.findUniqueOrThrow({ where: { id: runId } });
+      expect(run.status).toBe("ENDED");
+      expect(run.error).toBeNull(); // losing the lease is not a run failure
+    });
+
+    it("a stop that takes over an expired lease mid-refresh leaves no new variant discounted", async () => {
+      const clock = { now: new Date("2026-11-06T12:00:30Z") };
+      const { shopify, sent, handlers } = setup(clock);
+      await onceSale(true);
+      await handlers.tick();
+      const runId = sent[0].runId;
+      await handlers.startRun(runId);
+      shopify.addVariant("v3", "p3", RP(300_000));
+      shopify.setCollection("summer", ["p1", "p3"]);
+      clock.now = new Date(clock.now.getTime() + REFRESH_INTERVAL_MS);
+
+      let calls = 0;
+      let stop: Promise<void> | null = null;
+      shopify.beforeCall = async (method) => {
+        if (method !== "getVariants" || stop || ++calls < 2) return; // after the refresh planned, before it applies
+        clock.now = new Date(END.getTime() + LEASE_MS);
+        stop = handlers.stopRun(runId);
+        await stop;
+      };
+
+      await expect(handlers.refreshRun(runId)).rejects.toBeInstanceOf(LeaseLostError);
+
+      expect(shopify.variants.get("v1")).toMatchObject({ price: RP(200_000), marker: null });
+      expect(shopify.variants.get("v3")).toMatchObject({ price: RP(300_000), marker: null });
+      expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe("ENDED");
+    });
+
+    it("renews the lease while working and releases it afterwards", async () => {
+      const clock = { now: new Date("2026-11-06T12:00:30Z") };
+      const { shopify, sent, handlers } = setup(clock);
+      shopify.addVariant("v3", "p3", RP(300_000));
+      shopify.setCollection("summer", ["p1", "p3"]);
+      await onceSale();
+      await handlers.tick();
+      const runId = sent[0].runId;
+      const leases: (Date | null)[] = [];
+      shopify.beforeCall = async (method) => {
+        if (method !== "writePrices") return;
+        leases.push((await testDb.saleRun.findUniqueOrThrow({ where: { id: runId } })).leaseUntil);
+        clock.now = new Date(clock.now.getTime() + 10 * 60 * 1000); // each product takes 10 minutes
+      };
+
+      await handlers.startRun(runId);
+
+      // The 2nd product starts 10 minutes after the 1st and is still leased for a full LEASE_MS from then.
+      expect(leases[1]!.getTime()).toBe(new Date("2026-11-06T12:10:30Z").getTime() + LEASE_MS);
+      expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: runId } })).leaseUntil).toBeNull();
+      expect(shopify.variants.get("v3")!.price).toBe(RP(210_000));
+    });
+  });
+
+  describe("tick and live leases", () => {
+    async function leased(runId: string, until: Date | null) {
+      await testDb.saleRun.update({ where: { id: runId }, data: { leaseUntil: until } });
+    }
+
+    it("does not re-send a stranded start while a job holds the run's lease", async () => {
+      const clock = { now: new Date("2026-11-06T12:00:30Z") };
+      const { sent, handlers } = setup(clock);
+      await onceSale();
+      await handlers.tick();
+      const runId = sent[0].runId;
+      await leased(runId, new Date(clock.now.getTime() + 60_000));
+
+      await handlers.tick();
+      expect(sent).toHaveLength(1);
+
+      await leased(runId, new Date(clock.now.getTime() - 1)); // expired: the job holding it died
+      await handlers.tick();
+      expect(sent.at(-1)).toEqual({ queue: "run-start", runId });
+    });
+
+    it("does not send a stop or a refresh while a job holds the run's lease", async () => {
+      const clock = { now: new Date("2026-11-06T12:00:30Z") };
+      const { sent, handlers } = setup(clock);
+      await onceSale(true);
+      await handlers.tick();
+      const runId = sent[0].runId;
+      await handlers.startRun(runId);
+
+      clock.now = new Date(clock.now.getTime() + REFRESH_INTERVAL_MS);
+      await leased(runId, new Date(clock.now.getTime() + 60_000));
+      await handlers.tick();
+      expect(sent).toHaveLength(1);
+
+      clock.now = END;
+      await leased(runId, new Date(clock.now.getTime() + 60_000));
+      await handlers.tick();
+      expect(sent).toHaveLength(1);
+
+      await leased(runId, null);
+      await handlers.tick();
+      expect(sent.slice(1)).toContainEqual({ queue: "run-stop", runId });
     });
   });
 
