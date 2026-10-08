@@ -10,7 +10,9 @@ if (!connectionString) throw new Error("DATABASE_URL is not set");
 const boss = new PgBoss(connectionString);
 boss.on("error", (error) => console.error("[pg-boss]", error));
 await boss.start();
-for (const name of Object.values(QUEUES)) await boss.createQueue(name);
+await boss.createQueue(QUEUES.tick);
+// "stately" queues enforce singletonKey: at most one queued and one active job per run.
+for (const name of [QUEUES.start, QUEUES.stop, QUEUES.refresh]) await boss.createQueue(name, { name, policy: "stately" });
 
 const handlers = createJobHandlers({
   db: prisma,
@@ -20,7 +22,7 @@ const handlers = createJobHandlers({
     return createGraphqlGateway(adminGraphql(admin));
   },
   send: async (queue, data) => {
-    // singletonKey: never two queued jobs for the same run on the same queue.
+    // With the stately queue policy, singletonKey dedupes re-sends of the same run (one queued + one active).
     await boss.send(queue, data, { singletonKey: data.runId, retryLimit: 5, retryBackoff: true });
   },
 });

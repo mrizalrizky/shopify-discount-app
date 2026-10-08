@@ -44,9 +44,14 @@ export function createJobHandlers(deps: JobDeps) {
     try {
       const run = await db.saleRun.findUniqueOrThrow({ where: { id: runId }, include: { sale: true } });
       await work(run, await deps.gatewayFor(run.sale.shop));
+      await db.saleRun.updateMany({ where: { id: runId }, data: { error: null } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await db.saleRun.update({ where: { id: runId }, data: { error: message } });
+      try {
+        await db.saleRun.updateMany({ where: { id: runId }, data: { error: message } });
+      } catch (recordError) {
+        console.error(`[run ${runId}] failed to record error`, recordError);
+      }
       throw error;
     } finally {
       await db.saleRun.updateMany({ where: { id: runId, leaseUntil: until }, data: { leaseUntil: null } });
@@ -68,6 +73,13 @@ export function createJobHandlers(deps: JobDeps) {
         await deps.send(QUEUES.stop, { runId: action.runId });
       } else {
         await db.sale.update({ where: { id: sale.id }, data: { status: "ENDED" } });
+      }
+    }
+    // Re-queue starts for runs stranded after pg-boss exhausted its retries.
+    for (const run of sale.runs) {
+      const windowOpen = run.windowEnd === null || run.windowEnd.getTime() > now.getTime();
+      if ((run.status === "PREPARING" || run.status === "APPLYING") && windowOpen) {
+        await deps.send(QUEUES.start, { runId: run.id });
       }
     }
     if (sale.autoRefresh) {

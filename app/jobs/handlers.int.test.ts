@@ -65,7 +65,8 @@ describe("job handlers", () => {
     await Promise.all([handlers.tick(), handlers.tick()]);
 
     expect(await testDb.saleRun.count()).toBe(1);
-    expect(sent.filter((s) => s.queue === "run-start")).toHaveLength(1);
+    // A racing tick may re-send start for the same run (deduped by the stately queue); never a second run.
+    expect(new Set(sent.filter((s) => s.queue === "run-start").map((s) => s.runId)).size).toBe(1);
   });
 
   it("queues a refresh for auto-refresh sales every 20 minutes", async () => {
@@ -90,6 +91,37 @@ describe("job handlers", () => {
 
     await expect(handlers.startRun(sent[0].runId)).rejects.toThrow("simulated crash");
     expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: sent[0].runId } })).error).toBe("simulated crash");
+  });
+
+  it("re-sends start for a stranded run on the next tick, then applies prices", async () => {
+    const clock = { now: new Date("2026-11-06T12:00:30Z") };
+    const { shopify, sent, handlers } = setup(clock);
+    await onceSale();
+    await handlers.tick();
+    shopify.failAfterWrites = 0;
+    await expect(handlers.startRun(sent[0].runId)).rejects.toThrow("simulated crash");
+    shopify.failAfterWrites = null;
+
+    await handlers.tick();
+
+    expect(sent.at(-1)).toEqual({ queue: "run-start", runId: sent[0].runId });
+    await handlers.startRun(sent[0].runId);
+    expect(shopify.variants.get("v1")!.price).toBe(RP(140_000));
+    expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: sent[0].runId } })).error).toBeNull();
+  });
+
+  it("releases the lease and records the error after a failed job", async () => {
+    const clock = { now: new Date("2026-11-06T12:00:30Z") };
+    const { shopify, sent, handlers } = setup(clock);
+    await onceSale();
+    await handlers.tick();
+    shopify.failAfterWrites = 0;
+
+    await expect(handlers.startRun(sent[0].runId)).rejects.toThrow("simulated crash");
+
+    const run = await testDb.saleRun.findUniqueOrThrow({ where: { id: sent[0].runId } });
+    expect(run.leaseUntil).toBeNull();
+    expect(run.error).toBe("simulated crash");
   });
 
   describe("per-run lease", () => {
