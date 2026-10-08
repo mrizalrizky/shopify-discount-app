@@ -107,6 +107,7 @@ model SaleRun {
   endedAt         DateTime?
   lastRefreshedAt DateTime?
   error           String?
+  leaseUntil      DateTime?
   snapshots       PriceSnapshot[]
   products        RunProduct[]
 
