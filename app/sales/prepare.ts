@@ -1,4 +1,4 @@
-import type { PrismaClient, Sale } from "@prisma/client";
+import type { Prisma, PrismaClient, Sale } from "@prisma/client";
 import type { SkippedVariant } from "../domain/sales/plan";
 import { findOverlaps, type Overlap, type SaleVariants } from "../domain/sales/overlap";
 import type { ShopifyGateway } from "../shopify/gateway";
@@ -22,7 +22,27 @@ export async function prepareRun(
 
   const plan = await planForSale(gateway, run.sale, runId);
 
-  const overlaps = await findActiveOverlaps(db, run.sale, plan.changes.map((c) => c.variantId));
+  // The overlap check and snapshot write share one transaction guarded by a
+  // per-shop advisory lock, so concurrent prepares for the same shop serialize.
+  const overlaps = await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${run.sale.shop}))::text`;
+    const found = await findActiveOverlaps(tx, run.sale, plan.changes.map((c) => c.variantId));
+    if (found.length > 0) return found;
+
+    // All snapshots or none, verified, before Shopify is touched (spec §5.4 steps 2–3).
+    await tx.priceSnapshot.createMany({ data: plan.changes.map((c) => toSnapshotRow(runId, c)) });
+    const saved = await tx.priceSnapshot.count({ where: { runId } });
+    if (saved !== plan.changes.length) {
+      throw new Error(`Snapshot count mismatch: expected ${plan.changes.length}, saved ${saved}`);
+    }
+    const moved = await tx.saleRun.updateMany({
+      where: { id: runId, status: "PREPARING" },
+      data: { status: "APPLYING" },
+    });
+    if (moved.count !== 1) throw new Error(`Run ${runId} is no longer PREPARING`);
+    return [];
+  });
+
   if (overlaps.length > 0) {
     await db.saleRun.update({
       where: { id: runId },
@@ -34,20 +54,10 @@ export async function prepareRun(
     return { status: "overlap", overlaps };
   }
 
-  // All snapshots or none, verified, before Shopify is touched (spec §5.4 steps 2–3).
-  await db.$transaction(async (tx) => {
-    await tx.priceSnapshot.createMany({ data: plan.changes.map((c) => toSnapshotRow(runId, c)) });
-    const saved = await tx.priceSnapshot.count({ where: { runId } });
-    if (saved !== plan.changes.length) {
-      throw new Error(`Snapshot count mismatch: expected ${plan.changes.length}, saved ${saved}`);
-    }
-    await tx.saleRun.update({ where: { id: runId }, data: { status: "APPLYING" } });
-  });
-
   return { status: "ready", count: plan.changes.length, skipped: plan.skipped };
 }
 
-async function findActiveOverlaps(db: PrismaClient, sale: Sale, variantIds: string[]): Promise<Overlap[]> {
+async function findActiveOverlaps(db: Prisma.TransactionClient, sale: Sale, variantIds: string[]): Promise<Overlap[]> {
   const rows = await db.priceSnapshot.findMany({
     where: {
       status: { in: ["PENDING", "APPLIED"] },

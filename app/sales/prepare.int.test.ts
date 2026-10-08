@@ -78,4 +78,23 @@ describe("prepareRun", () => {
     expect(result).toMatchObject({ status: "ready", count: 1 });
     if (result.status === "ready") expect(result.skipped.map((s) => [s.variantId, s.reason])).toEqual([["v1", "in_other_sale"]]);
   });
+
+  it("lets only one of two concurrent prepares for overlapping sales succeed", async () => {
+    const shopify = store();
+    const saleA = await createSale(testDb, { groups: [{ targets: [{ kind: "product", id: "p1" }] }] });
+    const saleB = await createSale(testDb, { groups: [{ targets: [{ kind: "product", id: "p1" }] }] });
+    const runA = await createRun(testDb, saleA.id);
+    const runB = await createRun(testDb, saleB.id);
+
+    const settled = await Promise.allSettled([
+      prepareRun(testDb, shopify, runA.id),
+      prepareRun(testDb, shopify, runB.id),
+    ]);
+
+    const values = settled.map((r) => (r.status === "fulfilled" ? r.value.status : "rejected"));
+    expect(values.sort()).toEqual(["overlap", "ready"]);
+    const snaps = await testDb.priceSnapshot.findMany({ where: { variantId: { in: ["v1", "v2"] } } });
+    expect(snaps).toHaveLength(2);
+    expect(new Set(snaps.map((x) => x.runId)).size).toBe(1);
+  });
 });
