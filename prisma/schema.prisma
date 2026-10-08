@@ -32,3 +32,130 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+enum SaleStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  ENDED
+  FAILED
+}
+
+enum RunStatus {
+  PREPARING
+  APPLYING
+  ACTIVE
+  RESTORING
+  ENDED
+  FAILED
+}
+
+enum SnapshotStatus {
+  PENDING
+  APPLIED
+  RESTORED
+  CONFLICT
+  KEPT
+}
+
+model Sale {
+  id           String      @id @default(cuid())
+  shop         String
+  title        String
+  status       SaleStatus  @default(DRAFT)
+  timezone     String
+  priceBase    String
+  rounding     Json
+  minPrice     BigInt?
+  tagsToAdd    String[]
+  tagsToRemove String[]
+  scheduleKind String
+  startsAt     DateTime?
+  endsAt       DateTime?
+  recurring    Json?
+  autoRefresh  Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  ruleGroups   RuleGroup[]
+  runs         SaleRun[]
+
+  @@index([shop, status])
+}
+
+model RuleGroup {
+  id         String @id @default(cuid())
+  saleId     String
+  sale       Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  position   Int
+  priority   Int
+  amountType String
+  amount     Float
+  targets    Json
+  exclusions Json
+
+  @@index([saleId])
+}
+
+model SaleRun {
+  id              String          @id @default(cuid())
+  saleId          String
+  sale            Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  status          RunStatus       @default(PREPARING)
+  windowStart     DateTime
+  windowEnd       DateTime?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  lastRefreshedAt DateTime?
+  error           String?
+  snapshots       PriceSnapshot[]
+  products        RunProduct[]
+
+  @@unique([saleId, windowStart])
+}
+
+model PriceSnapshot {
+  id                String         @id @default(cuid())
+  runId             String
+  run               SaleRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  variantId         String
+  productId         String
+  ruleGroupId       String
+  originalPrice     BigInt
+  originalCompareAt BigInt?
+  appliedPrice      BigInt
+  appliedCompareAt  BigInt
+  status            SnapshotStatus @default(PENDING)
+  updatedAt         DateTime       @updatedAt
+
+  @@unique([runId, variantId])
+  @@index([runId, status])
+}
+
+model RunProduct {
+  id           String   @id @default(cuid())
+  runId        String
+  run          SaleRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  productId    String
+  addedTags    String[]
+  removedTags  String[]
+  tagsApplied  Boolean  @default(false)
+  tagsRestored Boolean  @default(false)
+
+  @@unique([runId, productId])
+}
+
+/// Append-only: application code only ever inserts rows.
+model PriceChangeLog {
+  id           String   @id @default(cuid())
+  shop         String
+  runId        String
+  variantId    String
+  action       String
+  oldPrice     BigInt
+  oldCompareAt BigInt?
+  newPrice     BigInt
+  newCompareAt BigInt?
+  createdAt    DateTime @default(now())
+
+  @@index([shop, createdAt])
+}

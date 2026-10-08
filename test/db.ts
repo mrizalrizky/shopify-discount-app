@@ -2,7 +2,15 @@ import { PrismaClient } from "@prisma/client";
 
 export const testDb = new PrismaClient();
 
-const TABLES = ["Session"];
+const TABLES = [
+  "Session",
+  "PriceChangeLog",
+  "RunProduct",
+  "PriceSnapshot",
+  "SaleRun",
+  "RuleGroup",
+  "Sale",
+];
 
 export async function resetDb(): Promise<void> {
   const list = TABLES.map((t) => `"${t}"`).join(", ");
