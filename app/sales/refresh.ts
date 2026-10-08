@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { ShopifyGateway } from "../shopify/gateway";
 import { applyRun } from "./apply";
+import { noGuard, type WriteGuard } from "./guard";
 import { planForSale, toSnapshotRow } from "./load";
 import { findActiveOverlaps, lockShop, SHOP_LOCK_TX_OPTIONS } from "./prepare";
 import { restoreSnapshots } from "./restore";
@@ -9,6 +10,7 @@ export async function refreshRun(
   db: PrismaClient,
   gateway: ShopifyGateway,
   runId: string,
+  guard: WriteGuard = noGuard,
 ): Promise<{ added: number; removed: number }> {
   const run = await db.saleRun.findUniqueOrThrow({
     where: { id: runId },
@@ -36,9 +38,9 @@ export async function refreshRun(
   }, SHOP_LOCK_TX_OPTIONS);
 
   const leaving = snapshots.filter((s) => s.status === "APPLIED" && !planned.has(s.variantId));
-  if (leaving.length > 0) await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, leaving);
+  if (leaving.length > 0) await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, leaving, guard);
   const stranded = snapshots.some((s) => s.status === "PENDING");
-  if (added.length > 0 || stranded) await applyRun(db, gateway, runId);
+  if (added.length > 0 || stranded) await applyRun(db, gateway, runId, guard);
 
   await db.saleRun.update({ where: { id: runId }, data: { lastRefreshedAt: new Date() } });
   return { added: added.length, removed: leaving.length };

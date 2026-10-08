@@ -1,12 +1,14 @@
 import type { PriceSnapshot, PrismaClient } from "@prisma/client";
 import type { ShopifyGateway } from "../shopify/gateway";
 import { groupBy, snapshotMatches } from "./apply";
+import { noGuard, type WriteGuard } from "./guard";
 import { moneyFromDb, moneyToDb, optionalMoneyFromDb, optionalMoneyToDb } from "./money-db";
 
 export async function restoreRun(
   db: PrismaClient,
   gateway: ShopifyGateway,
   runId: string,
+  guard: WriteGuard = noGuard,
 ): Promise<{ restored: number; conflicts: number }> {
   const run = await db.saleRun.findUniqueOrThrow({ where: { id: runId }, include: { sale: true } });
   if (run.status === "ENDED") return { restored: 0, conflicts: 0 };
@@ -24,8 +26,8 @@ export async function restoreRun(
     where: { runId, status: { in: ["PENDING", "APPLIED"] } },
     orderBy: { variantId: "asc" },
   });
-  const result = await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, snapshots);
-  await restoreTags(db, gateway, runId);
+  const result = await restoreSnapshots(db, gateway, { runId, saleId: run.saleId, shop: run.sale.shop }, snapshots, guard);
+  await restoreTags(db, gateway, runId, guard);
   await db.saleRun.updateMany({ where: { id: runId, status: "RESTORING" }, data: { status: "ENDED", endedAt: new Date() } });
   return result;
 }
@@ -41,12 +43,14 @@ export async function restoreSnapshots(
   gateway: ShopifyGateway,
   { runId, saleId, shop }: RunContext,
   snapshots: PriceSnapshot[],
+  guard: WriteGuard = noGuard,
 ): Promise<{ restored: number; conflicts: number }> {
-  const states = await gateway.getVariants(snapshots.map((s) => s.variantId));
   let restored = 0;
   let conflicts = 0;
 
   for (const [productId, snaps] of groupBy(snapshots, (s) => s.productId)) {
+    // Read right before writing so an edit made while earlier products were restored is a conflict.
+    const states = await gateway.getVariants(snaps.map((s) => s.variantId));
     const settled: PriceSnapshot[] = []; // gone, or already back at original prices
     const toWrite: PriceSnapshot[] = [];
     const conflicted: PriceSnapshot[] = [];
@@ -67,6 +71,7 @@ export async function restoreSnapshots(
       }
     }
 
+    await guard();
     if (toWrite.length > 0) {
       await gateway.writePrices(
         productId,
@@ -115,9 +120,10 @@ export async function restoreSnapshots(
   return { restored, conflicts };
 }
 
-async function restoreTags(db: PrismaClient, gateway: ShopifyGateway, runId: string) {
+async function restoreTags(db: PrismaClient, gateway: ShopifyGateway, runId: string, guard: WriteGuard) {
   const rows = await db.runProduct.findMany({ where: { runId, tagsRestored: false } });
   for (const row of rows) {
+    await guard();
     await gateway.removeTags(row.productId, row.addedTags);
     await gateway.addTags(row.productId, row.removedTags);
     await db.runProduct.update({ where: { id: row.id }, data: { tagsRestored: true } });

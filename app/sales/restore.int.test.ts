@@ -3,6 +3,7 @@ import { resetDb, testDb } from "../../test/db";
 import { createRun, createSale } from "../../test/factories";
 import { FakeShopify } from "../../test/fake-shopify";
 import { applyRun } from "./apply";
+import { LeaseLostError } from "./guard";
 import { prepareRun } from "./prepare";
 import { recoverFromMetafields, resolveConflict, restoreRun } from "./restore";
 
@@ -192,5 +193,38 @@ describe("restoreRun concurrency", () => {
     expect(shopify.variants.get("v1")).toMatchObject({ price: RP(200_000), compareAt: null, marker: null });
     expect(shopify.variants.get("v2")).toMatchObject({ price: RP(400_000), compareAt: RP(500_000), marker: null });
     expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("ENDED");
+  });
+});
+
+describe("restoreRun mid-run changes", () => {
+  beforeEach(resetDb);
+
+  it("reads each product right before restoring it, so a merchant edit made meanwhile is a conflict", async () => {
+    const shopify = store();
+    const run = await activeRun(shopify);
+    const writes = shopify.writeCount;
+    shopify.beforeCall = async () => {
+      if (shopify.writeCount === writes + 1) shopify.variants.get("v3")!.price = RP(250_000); // edit p2 after p1 restored
+    };
+
+    expect(await restoreRun(testDb, shopify, run.id)).toEqual({ restored: 2, conflicts: 1 });
+
+    expect(shopify.variants.get("v3")!.price).toBe(RP(250_000));
+    expect((await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v3" } })).status).toBe("CONFLICT");
+  });
+
+  it("checks the write guard before each product and stops when it throws", async () => {
+    const shopify = store();
+    const run = await activeRun(shopify);
+    const writes = shopify.writeCount;
+    let calls = 0;
+    const guard = async () => {
+      if (++calls === 2) throw new LeaseLostError("lease lost");
+    };
+
+    await expect(restoreRun(testDb, shopify, run.id, guard)).rejects.toBeInstanceOf(LeaseLostError);
+
+    expect(shopify.writeCount).toBe(writes + 1);
+    expect(shopify.variants.get("v3")!.price).toBe(RP(210_000));
   });
 });

@@ -2,13 +2,22 @@ import type { Money } from "../app/domain/pricing/money";
 import type { CatalogIndex, Target } from "../app/domain/sales/resolver";
 import type { PriceWrite, ShopifyGateway, VariantState } from "../app/shopify/gateway";
 
-/** In-memory Shopify. `failAfterWrites` simulates a crash after N successful price writes. */
+/**
+ * In-memory Shopify. `failAfterWrites` simulates a crash after N successful price writes.
+ * `beforeCall` runs at the start of every gateway call, to interleave other work (races, merchant edits).
+ */
 export class FakeShopify implements ShopifyGateway {
   variants = new Map<string, VariantState>();
   collections = new Map<string, string[]>();
   tags = new Map<string, string[]>();
   writeCount = 0;
   failAfterWrites: number | null = null;
+  beforeCall: ((method: keyof ShopifyGateway) => Promise<void>) | null = null;
+  getVariantsCalls = 0;
+
+  private async hook(method: keyof ShopifyGateway) {
+    if (this.beforeCall) await this.beforeCall(method);
+  }
 
   addVariant(variantId: string, productId: string, price: Money, compareAt: Money | null = null) {
     this.variants.set(variantId, { variantId, productId, price, compareAt, marker: null });
@@ -23,6 +32,7 @@ export class FakeShopify implements ShopifyGateway {
   }
 
   async loadCatalog(targets: readonly Target[]): Promise<CatalogIndex> {
+    await this.hook("loadCatalog");
     const collectionProducts = new Map<string, string[]>();
     for (const t of targets) {
       if (t.kind === "collection") collectionProducts.set(t.id, [...(this.collections.get(t.id) ?? [])]);
@@ -35,6 +45,8 @@ export class FakeShopify implements ShopifyGateway {
   }
 
   async getVariants(variantIds: readonly string[]) {
+    await this.hook("getVariants");
+    this.getVariantsCalls++;
     const result = new Map<string, VariantState>();
     for (const id of variantIds) {
       const v = this.variants.get(id);
@@ -44,6 +56,7 @@ export class FakeShopify implements ShopifyGateway {
   }
 
   async writePrices(productId: string, writes: readonly PriceWrite[]) {
+    await this.hook("writePrices");
     if (this.failAfterWrites !== null && this.writeCount >= this.failAfterWrites) {
       throw new Error("simulated crash");
     }
@@ -58,6 +71,7 @@ export class FakeShopify implements ShopifyGateway {
   }
 
   async clearMarkers(variantIds: readonly string[]) {
+    await this.hook("clearMarkers");
     for (const id of variantIds) {
       const v = this.variants.get(id);
       if (v) v.marker = null;
@@ -65,15 +79,18 @@ export class FakeShopify implements ShopifyGateway {
   }
 
   async getProductTags(productIds: readonly string[]) {
+    await this.hook("getProductTags");
     return new Map(productIds.map((id) => [id, [...(this.tags.get(id) ?? [])]]));
   }
 
   async addTags(productId: string, tags: readonly string[]) {
+    await this.hook("addTags");
     const current = this.tags.get(productId) ?? [];
     this.tags.set(productId, [...current, ...tags.filter((t) => !current.includes(t))]);
   }
 
   async removeTags(productId: string, tags: readonly string[]) {
+    await this.hook("removeTags");
     this.tags.set(productId, (this.tags.get(productId) ?? []).filter((t) => !tags.includes(t)));
   }
 }

@@ -3,7 +3,9 @@ import { resetDb, testDb } from "../../test/db";
 import { createRun, createSale } from "../../test/factories";
 import { FakeShopify } from "../../test/fake-shopify";
 import { applyRun } from "./apply";
+import { LeaseLostError, RunSupersededError } from "./guard";
 import { prepareRun } from "./prepare";
+import { restoreRun } from "./restore";
 
 const RP = (rupiah: number) => rupiah * 100;
 
@@ -137,5 +139,52 @@ describe("applyRun", () => {
     const sale = await createSale(testDb, { groups: [] });
     const run = await createRun(testDb, sale.id);
     await expect(applyRun(testDb, shopify, run.id)).rejects.toThrow(/PREPARING/);
+  });
+});
+
+describe("applyRun mid-run changes", () => {
+  beforeEach(resetDb);
+
+  it("reads each product right before writing it, so a merchant edit made meanwhile is a conflict", async () => {
+    const shopify = store();
+    const { run } = await preparedRun(shopify);
+    shopify.beforeCall = async () => {
+      if (shopify.writeCount === 1) shopify.variants.get("v3")!.price = RP(250_000); // merchant edits p2 after p1 is written
+    };
+
+    expect(await applyRun(testDb, shopify, run.id)).toEqual({ applied: 2, conflicts: 1 });
+
+    expect(shopify.variants.get("v3")).toMatchObject({ price: RP(250_000), marker: null });
+    expect((await testDb.priceSnapshot.findFirstOrThrow({ where: { runId: run.id, variantId: "v3" } })).status).toBe("CONFLICT");
+  });
+
+  it("stops before writing when the run is ended while it is applying", async () => {
+    const shopify = store();
+    const { run } = await preparedRun(shopify);
+    let ended: Promise<unknown> | null = null;
+    shopify.beforeCall = async () => {
+      if (shopify.writeCount !== 1 || ended) return;
+      ended = restoreRun(testDb, shopify, run.id);
+      await ended;
+    };
+
+    await expect(applyRun(testDb, shopify, run.id)).rejects.toBeInstanceOf(RunSupersededError);
+
+    expect(shopify.variants.get("v3")).toMatchObject({ price: RP(300_000), marker: null });
+    expect((await testDb.saleRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("ENDED");
+  });
+
+  it("checks the write guard before each product and stops when it throws", async () => {
+    const shopify = store();
+    const { run } = await preparedRun(shopify);
+    let calls = 0;
+    const guard = async () => {
+      if (++calls === 2) throw new LeaseLostError("lease lost");
+    };
+
+    await expect(applyRun(testDb, shopify, run.id, guard)).rejects.toBeInstanceOf(LeaseLostError);
+
+    expect(shopify.writeCount).toBe(1);
+    expect(shopify.variants.get("v3")!.price).toBe(RP(300_000));
   });
 });

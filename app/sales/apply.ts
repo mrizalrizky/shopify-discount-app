@@ -1,11 +1,18 @@
 import type { PriceSnapshot, PrismaClient, Sale, SaleRun } from "@prisma/client";
 import type { ShopifyGateway, VariantState } from "../shopify/gateway";
+import { noGuard, RunSupersededError, type WriteGuard } from "./guard";
 import { moneyFromDb, optionalMoneyFromDb } from "./money-db";
 
+/**
+ * Writes sale prices product by product. Each product's Shopify state is read right
+ * before its write, and `guard` (the job's lease) plus the run status are checked
+ * between that read and the write, so a job that lost the run never writes.
+ */
 export async function applyRun(
   db: PrismaClient,
   gateway: ShopifyGateway,
   runId: string,
+  guard: WriteGuard = noGuard,
 ): Promise<{ applied: number; conflicts: number }> {
   const run = await db.saleRun.findUniqueOrThrow({ where: { id: runId }, include: { sale: true } });
   if (run.status !== "APPLYING" && run.status !== "ACTIVE") {
@@ -16,11 +23,11 @@ export async function applyRun(
     where: { runId, status: "PENDING" },
     orderBy: { variantId: "asc" },
   });
-  const states = await gateway.getVariants(pending.map((s) => s.variantId));
 
   let applied = 0;
   let conflicts = 0;
   for (const [productId, snaps] of groupBy(pending, (s) => s.productId)) {
+    const states = await gateway.getVariants(snaps.map((s) => s.variantId));
     const alreadyWritten: PriceSnapshot[] = [];
     const toWrite: PriceSnapshot[] = [];
     const conflicted: PriceSnapshot[] = [];
@@ -36,7 +43,9 @@ export async function applyRun(
       }
     }
 
+    await guard();
     if (toWrite.length > 0) {
+      await assertRunApplicable(db, runId);
       await gateway.writePrices(
         productId,
         toWrite.map((s) => ({
@@ -89,7 +98,7 @@ export async function applyRun(
     conflicts += conflicted.length;
   }
 
-  await applyTags(db, gateway, run);
+  await applyTags(db, gateway, run, guard);
 
   if (run.status === "APPLYING") {
     await db.saleRun.updateMany({ where: { id: runId, status: "APPLYING" }, data: { status: "ACTIVE", startedAt: new Date() } });
@@ -97,8 +106,15 @@ export async function applyRun(
   return { applied, conflicts };
 }
 
+async function assertRunApplicable(db: PrismaClient, runId: string) {
+  const { status } = await db.saleRun.findUniqueOrThrow({ where: { id: runId }, select: { status: true } });
+  if (status !== "APPLYING" && status !== "ACTIVE") {
+    throw new RunSupersededError(`Run ${runId} moved to ${status} while applying`);
+  }
+}
+
 /** Records the tag change first, then applies it, so a crash can always be undone. */
-async function applyTags(db: PrismaClient, gateway: ShopifyGateway, run: SaleRun & { sale: Sale }) {
+async function applyTags(db: PrismaClient, gateway: ShopifyGateway, run: SaleRun & { sale: Sale }, guard: WriteGuard) {
   const { tagsToAdd, tagsToRemove } = run.sale;
   if (tagsToAdd.length === 0 && tagsToRemove.length === 0) return;
 
@@ -126,6 +142,8 @@ async function applyTags(db: PrismaClient, gateway: ShopifyGateway, run: SaleRun
 
   const unapplied = await db.runProduct.findMany({ where: { runId: run.id, tagsApplied: false } });
   for (const row of unapplied) {
+    await guard();
+    await assertRunApplicable(db, run.id);
     await gateway.addTags(row.productId, row.addedTags);
     await gateway.removeTags(row.productId, row.removedTags);
     await db.runProduct.update({ where: { id: row.id }, data: { tagsApplied: true } });
